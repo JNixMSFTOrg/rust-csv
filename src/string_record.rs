@@ -430,14 +430,23 @@ impl StringRecord {
         if length == 0 {
             return;
         }
-        // TODO: We could likely do this in place, but for now, we allocate.
-        let mut trimmed =
-            StringRecord::with_capacity(self.as_slice().len(), self.len());
-        trimmed.set_position(self.position().cloned());
-        for field in &*self {
-            trimmed.push_field(field.trim());
+        let mut end = 0;
+        for i in 0..length {
+            let (start, old_end) = {
+                let range = self.0.range(i).expect("field range must exist");
+                (range.start, range.end)
+            };
+            let field = &self.as_slice()[start..old_end];
+            let trimmed = field.trim();
+            let trimmed_start = start + (field.len() - field.trim_start().len());
+            let trimmed_end = trimmed_start + trimmed.len();
+            if start != end && trimmed_start != trimmed_end {
+                self.0.0.fields.copy_within(trimmed_start..trimmed_end, end);
+            }
+            end += trimmed.len();
+            self.0.0.bounds.ends[i] = end;
         }
-        *self = trimmed;
+        self.0.0.fields.truncate(end);
     }
 
     /// Add a new field to this record.
@@ -813,6 +822,25 @@ mod tests {
         ]);
         rec.trim();
         assert_eq!(rec.get(0), Some(""));
+    }
+
+    #[test]
+    fn trim_preserves_position_and_compacts_in_place() {
+        use crate::byte_record::Position;
+
+        let mut rec = StringRecord::from(vec!["  alpha  ", "\u{3000}beta\t"]);
+        let mut pos = Position::new();
+        pos.set_byte(13);
+        pos.set_line(2);
+        pos.set_record(1);
+        rec.set_position(Some(pos.clone()));
+
+        rec.trim();
+
+        assert_eq!(rec.position(), Some(&pos));
+        assert_eq!(rec.as_slice(), "alphabeta");
+        assert_eq!(rec.get(0), Some("alpha"));
+        assert_eq!(rec.get(1), Some("beta"));
     }
 
     // Check that record equality respects field boundaries.
