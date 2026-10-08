@@ -81,6 +81,15 @@ pub enum ErrorKind {
         /// The number of fields in the bad record.
         len: u64,
     },
+    /// This error occurs when a record exceeds the maximum supported number of
+    /// fields.
+    FieldCount {
+        /// The position of the record that exceeded the field count limit, if
+        /// available.
+        pos: Option<Position>,
+        /// The maximum number of supported fields in a record.
+        max: u64,
+    },
     /// This error occurs when either the `byte_headers` or `headers` methods
     /// are called on a CSV reader that was asked to `seek` before it parsed
     /// the first record.
@@ -106,6 +115,7 @@ impl ErrorKind {
         match *self {
             ErrorKind::Utf8 { ref pos, .. } => pos.as_ref(),
             ErrorKind::UnequalLengths { ref pos, .. } => pos.as_ref(),
+            ErrorKind::FieldCount { ref pos, .. } => pos.as_ref(),
             ErrorKind::Deserialize { ref pos, .. } => pos.as_ref(),
             _ => None,
         }
@@ -166,6 +176,22 @@ impl fmt::Display for Error {
                 pos.byte(),
                 len,
                 expected_len
+            ),
+            ErrorKind::FieldCount { pos: None, max } => {
+                write!(
+                    f,
+                    "CSV error: found record with more than {} fields",
+                    max
+                )
+            }
+            ErrorKind::FieldCount { pos: Some(ref pos), max } => write!(
+                f,
+                "CSV error: record {} (line: {}, byte: {}): \
+                 found record with more than {} fields",
+                pos.record(),
+                pos.line(),
+                pos.byte(),
+                max
             ),
             ErrorKind::Seek => write!(
                 f,

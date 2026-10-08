@@ -18,6 +18,13 @@ use crate::{
     {Terminator, Trim},
 };
 
+const MAX_RECORD_FIELDS: u64 = usize::MAX as u64;
+
+#[inline(always)]
+fn record_field_count_exhausted(endlen: usize, ends_capacity: usize) -> bool {
+    endlen == ends_capacity && endlen as u64 >= MAX_RECORD_FIELDS
+}
+
 /// Builds a CSV reader with various configuration knobs.
 ///
 /// This builder can be used to tweak the field delimiter, record terminator
@@ -1657,6 +1664,12 @@ impl<R: io::Read> Reader<R> {
                     continue;
                 }
                 OutputEndsFull => {
+                    if record_field_count_exhausted(endlen, record.as_parts().1.len()) {
+                        return Err(Error::new(ErrorKind::FieldCount {
+                            pos: record.position().cloned(),
+                            max: MAX_RECORD_FIELDS,
+                        }));
+                    }
                     record.expand_ends();
                     continue;
                 }
@@ -2635,5 +2648,16 @@ mod tests {
             ReaderBuilder::new().has_headers(false).from_reader("".as_bytes());
         assert_eq!(rdr.headers().unwrap().len(), 0);
         assert_eq!(rdr.records().count(), 0);
+    }
+
+    #[test]
+    fn record_field_count_exhausted_at_limit() {
+        assert!(record_field_count_exhausted(usize::MAX, usize::MAX));
+    }
+
+    #[test]
+    fn record_field_count_not_exhausted_below_limit() {
+        assert!(!record_field_count_exhausted(1, 2));
+        assert!(!record_field_count_exhausted(usize::MAX - 1, usize::MAX - 1));
     }
 }
