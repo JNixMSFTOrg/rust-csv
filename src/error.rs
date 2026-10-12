@@ -85,6 +85,16 @@ pub enum ErrorKind {
     /// are called on a CSV reader that was asked to `seek` before it parsed
     /// the first record.
     Seek,
+    /// This error occurs when a header record exceeds the configured field
+    /// count limit.
+    HeaderTooLarge {
+        /// The position of the header record, if available.
+        pos: Option<Position>,
+        /// The configured maximum number of header fields.
+        limit: u64,
+        /// The number of fields parsed from the header record.
+        len: u64,
+    },
     /// An error of this kind occurs only when using the Serde serializer.
     Serialize(String),
     /// An error of this kind occurs only when performing automatic
@@ -106,6 +116,7 @@ impl ErrorKind {
         match *self {
             ErrorKind::Utf8 { ref pos, .. } => pos.as_ref(),
             ErrorKind::UnequalLengths { ref pos, .. } => pos.as_ref(),
+            ErrorKind::HeaderTooLarge { ref pos, .. } => pos.as_ref(),
             ErrorKind::Deserialize { ref pos, .. } => pos.as_ref(),
             _ => None,
         }
@@ -172,6 +183,25 @@ impl fmt::Display for Error {
                 "CSV error: cannot access headers of CSV data \
                  when the parser was seeked before the first record \
                  could be read"
+            ),
+            ErrorKind::HeaderTooLarge { pos: None, limit, len } => write!(
+                f,
+                "CSV error: found header with {} fields, which exceeds the configured limit of {}",
+                len,
+                limit
+            ),
+            ErrorKind::HeaderTooLarge {
+                pos: Some(ref pos),
+                limit,
+                len,
+            } => write!(
+                f,
+                "CSV error: record {} (line: {}, byte: {}): found header with {} fields, which exceeds the configured limit of {}",
+                pos.record(),
+                pos.line(),
+                pos.byte(),
+                len,
+                limit
             ),
             ErrorKind::Serialize(ref err) => {
                 write!(f, "CSV write error: {}", err)

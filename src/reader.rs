@@ -18,6 +18,8 @@ use crate::{
     {Terminator, Trim},
 };
 
+const DEFAULT_MAX_HEADER_FIELDS: u64 = 16 * 1024;
+
 /// Builds a CSV reader with various configuration knobs.
 ///
 /// This builder can be used to tweak the field delimiter, record terminator
@@ -28,6 +30,7 @@ pub struct ReaderBuilder {
     capacity: usize,
     flexible: bool,
     has_headers: bool,
+    max_header_fields: u64,
     trim: Trim,
     /// The underlying CSV parser builder.
     ///
@@ -43,6 +46,7 @@ impl Default for ReaderBuilder {
             capacity: 8 * (1 << 10),
             flexible: false,
             has_headers: true,
+            max_header_fields: DEFAULT_MAX_HEADER_FIELDS,
             trim: Trim::default(),
             builder: Box::new(CoreReaderBuilder::default()),
         }
@@ -226,6 +230,16 @@ impl ReaderBuilder {
     /// ```
     pub fn has_headers(&mut self, yes: bool) -> &mut ReaderBuilder {
         self.has_headers = yes;
+        self
+    }
+
+    /// Set the maximum number of fields permitted in the header record.
+    ///
+    /// This limit is enforced when the first record is cached as headers,
+    /// whether it is read explicitly via `headers`/`byte_headers` or
+    /// implicitly while reading records. The default is 16,384 fields.
+    pub fn max_header_fields(&mut self, max: u64) -> &mut ReaderBuilder {
+        self.max_header_fields = max;
         self
     }
 
@@ -734,6 +748,7 @@ struct ReaderState {
     /// When set, the first row of parsed CSV data is excluded from things
     /// that read records, like iterators and `read_record`.
     has_headers: bool,
+    max_header_fields: u64,
     /// When set, there is no restriction on the length of records. When not
     /// set, every record must have the same number of fields, or else an error
     /// is reported.
@@ -829,6 +844,7 @@ impl<R: io::Read> Reader<R> {
             state: ReaderState {
                 headers: None,
                 has_headers: builder.has_headers,
+                max_header_fields: builder.max_header_fields,
                 flexible: builder.flexible,
                 trim: builder.trim,
                 first_field_count: None,
@@ -1393,6 +1409,7 @@ impl<R: io::Read> Reader<R> {
         if self.state.headers.is_none() {
             let mut record = ByteRecord::new();
             self.read_byte_record_impl(&mut record)?;
+            self.state.validate_header(&record)?;
             self.set_headers_impl(Err(record));
         }
         Ok(&self.state.headers.as_ref().unwrap().byte_record)
@@ -1595,6 +1612,7 @@ impl<R: io::Read> Reader<R> {
         let ok = self.read_byte_record_impl(record)?;
         self.state.first = true;
         if !self.state.seeked && self.state.headers.is_none() {
+            self.state.validate_header(record)?;
             self.set_headers_impl(Err(record.clone()));
             // If the end user indicated that we have headers, then we should
             // never return the first row. Instead, we should attempt to
@@ -1878,6 +1896,19 @@ impl<R: io::Read + io::Seek> Reader<R> {
 }
 
 impl ReaderState {
+    #[inline(always)]
+    fn validate_header(&self, record: &ByteRecord) -> Result<()> {
+        let len = record.len() as u64;
+        if len > self.max_header_fields {
+            return Err(Error::new(ErrorKind::HeaderTooLarge {
+                pos: record.position().cloned(),
+                limit: self.max_header_fields,
+                len,
+            }));
+        }
+        Ok(())
+    }
+
     #[inline(always)]
     fn add_record(&mut self, record: &ByteRecord) -> Result<()> {
         let i = self.cur_pos.record();
@@ -2463,6 +2494,62 @@ mod tests {
             }
             ref err => panic!("match failed, got {:?}", err),
         }
+    }
+
+    #[test]
+    fn read_byte_headers_limit_exceeded() {
+        let data = b("h1,h2,h3\na,b,c\n");
+        let mut rdr =
+            ReaderBuilder::new().max_header_fields(2).from_reader(data);
+
+        match rdr.byte_headers() {
+            Err(err) => match *err.kind() {
+                ErrorKind::HeaderTooLarge {
+                    ref pos,
+                    limit: 2,
+                    len: 3,
+                } => {
+                    assert_eq!(pos, &Some(newpos(0, 1, 0)));
+                }
+                ref wrong => panic!("match failed, got {:?}", wrong),
+            },
+            wrong => panic!("match failed, got {:?}", wrong),
+        }
+    }
+
+    #[test]
+    fn read_record_headers_limit_exceeded() {
+        let data = b("h1,h2,h3\na,b,c\n");
+        let mut rdr =
+            ReaderBuilder::new().max_header_fields(2).from_reader(data);
+        let mut rec = ByteRecord::new();
+
+        match rdr.read_byte_record(&mut rec) {
+            Err(err) => match *err.kind() {
+                ErrorKind::HeaderTooLarge {
+                    ref pos,
+                    limit: 2,
+                    len: 3,
+                } => {
+                    assert_eq!(pos, &Some(newpos(0, 1, 0)));
+                }
+                ref wrong => panic!("match failed, got {:?}", wrong),
+            },
+            wrong => panic!("match failed, got {:?}", wrong),
+        }
+    }
+
+    #[test]
+    fn read_headers_within_limit() {
+        let data = b("h1,h2,h3\na,b,c\n");
+        let mut rdr =
+            ReaderBuilder::new().max_header_fields(3).from_reader(data);
+
+        let headers = rdr.byte_headers().unwrap();
+        assert_eq!(3, headers.len());
+        assert_eq!(b"h1", &headers[0]);
+        assert_eq!(b"h2", &headers[1]);
+        assert_eq!(b"h3", &headers[2]);
     }
 
     #[test]
