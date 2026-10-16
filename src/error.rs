@@ -81,6 +81,16 @@ pub enum ErrorKind {
         /// The number of fields in the bad record.
         len: u64,
     },
+    /// This error occurs when a record exceeds one of the configured parser
+    /// limits, such as a maximum row width or maximum number of fields.
+    RecordTooLarge {
+        /// The position of the oversized record, if available.
+        pos: Option<Position>,
+        /// The kind of limit that was exceeded.
+        kind: RecordTooLargeKind,
+        /// The configured limit that was exceeded.
+        limit: u64,
+    },
     /// This error occurs when either the `byte_headers` or `headers` methods
     /// are called on a CSV reader that was asked to `seek` before it parsed
     /// the first record.
@@ -97,6 +107,16 @@ pub enum ErrorKind {
     },
 }
 
+/// The specific record-size limit that was exceeded while reading CSV data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RecordTooLargeKind {
+    /// The record's backing byte buffer exceeded the configured maximum.
+    Bytes,
+    /// The record's field count exceeded the configured maximum.
+    Fields,
+}
+
 impl ErrorKind {
     /// Return the position for this error, if one exists.
     ///
@@ -106,6 +126,7 @@ impl ErrorKind {
         match *self {
             ErrorKind::Utf8 { ref pos, .. } => pos.as_ref(),
             ErrorKind::UnequalLengths { ref pos, .. } => pos.as_ref(),
+            ErrorKind::RecordTooLarge { ref pos, .. } => pos.as_ref(),
             ErrorKind::Deserialize { ref pos, .. } => pos.as_ref(),
             _ => None,
         }
@@ -167,6 +188,29 @@ impl fmt::Display for Error {
                 len,
                 expected_len
             ),
+            ErrorKind::RecordTooLarge {
+                pos: None,
+                kind,
+                limit,
+            } => write!(
+                f,
+                "CSV error: record exceeds configured {} limit of {}",
+                kind,
+                limit
+            ),
+            ErrorKind::RecordTooLarge {
+                pos: Some(ref pos),
+                kind,
+                limit,
+            } => write!(
+                f,
+                "CSV error: record {} (line: {}, byte: {}): record exceeds configured {} limit of {}",
+                pos.record(),
+                pos.line(),
+                pos.byte(),
+                kind,
+                limit
+            ),
             ErrorKind::Seek => write!(
                 f,
                 "CSV error: cannot access headers of CSV data \
@@ -188,6 +232,15 @@ impl fmt::Display for Error {
                 pos.byte(),
                 err
             ),
+        }
+    }
+}
+
+impl fmt::Display for RecordTooLargeKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            RecordTooLargeKind::Bytes => write!(f, "record byte length"),
+            RecordTooLargeKind::Fields => write!(f, "record field count"),
         }
     }
 }

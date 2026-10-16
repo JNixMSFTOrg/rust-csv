@@ -33,6 +33,12 @@ and
 `StringRecord` should be used when you know your data to be valid UTF-8.
 For data that may be invalid UTF-8, `ByteRecord` is suitable.
 
+When parsing untrusted CSV data, consider setting per-record quotas with
+[`ReaderBuilder::max_record_bytes`](struct.ReaderBuilder.html#method.max_record_bytes)
+and
+[`ReaderBuilder::max_record_fields`](struct.ReaderBuilder.html#method.max_record_fields)
+to reject unexpectedly wide rows before they force unbounded buffer growth.
+
 Finally, the set of errors is described by the
 [`Error`](struct.Error.html)
 type.
@@ -143,7 +149,8 @@ pub use crate::{
     byte_record::{ByteRecord, ByteRecordIter, Position},
     deserializer::{DeserializeError, DeserializeErrorKind},
     error::{
-        Error, ErrorKind, FromUtf8Error, IntoInnerError, Result, Utf8Error,
+        Error, ErrorKind, FromUtf8Error, IntoInnerError, RecordTooLargeKind,
+        Result, Utf8Error,
     },
     reader::{
         ByteRecordsIntoIter, ByteRecordsIter, DeserializeRecordsIntoIter,
