@@ -13,7 +13,7 @@ use {
 
 use crate::{
     byte_record::{ByteRecord, Position},
-    error::{Error, ErrorKind, Result, Utf8Error},
+    error::{Error, ErrorKind, RecordTooLargeKind, Result, Utf8Error},
     string_record::StringRecord,
     {Terminator, Trim},
 };
@@ -28,6 +28,8 @@ pub struct ReaderBuilder {
     capacity: usize,
     flexible: bool,
     has_headers: bool,
+    max_record_bytes: Option<u64>,
+    max_record_fields: Option<u64>,
     trim: Trim,
     /// The underlying CSV parser builder.
     ///
@@ -43,6 +45,8 @@ impl Default for ReaderBuilder {
             capacity: 8 * (1 << 10),
             flexible: false,
             has_headers: true,
+            max_record_bytes: None,
+            max_record_fields: None,
             trim: Trim::default(),
             builder: Box::new(CoreReaderBuilder::default()),
         }
@@ -308,6 +312,29 @@ impl ReaderBuilder {
     /// ```
     pub fn flexible(&mut self, yes: bool) -> &mut ReaderBuilder {
         self.flexible = yes;
+        self
+    }
+
+    /// Set the maximum number of bytes allowed in a single parsed record.
+    ///
+    /// When set, reading a record whose serialized field data would require
+    /// more than `limit` bytes returns an error instead of continuing to grow
+    /// the backing buffer. By default, no byte limit is enforced.
+    pub fn max_record_bytes(&mut self, limit: Option<u64>) -> &mut ReaderBuilder {
+        self.max_record_bytes = limit;
+        self
+    }
+
+    /// Set the maximum number of fields allowed in a single parsed record.
+    ///
+    /// When set, reading a record with more than `limit` fields returns an
+    /// error instead of continuing to grow the field-boundary buffer. By
+    /// default, no field-count limit is enforced.
+    pub fn max_record_fields(
+        &mut self,
+        limit: Option<u64>,
+    ) -> &mut ReaderBuilder {
+        self.max_record_fields = limit;
         self
     }
 
@@ -738,6 +765,8 @@ struct ReaderState {
     /// set, every record must have the same number of fields, or else an error
     /// is reported.
     flexible: bool,
+    max_record_bytes: Option<u64>,
+    max_record_fields: Option<u64>,
     trim: Trim,
     /// The number of fields in the first record parsed.
     first_field_count: Option<u64>,
@@ -830,6 +859,8 @@ impl<R: io::Read> Reader<R> {
                 headers: None,
                 has_headers: builder.has_headers,
                 flexible: builder.flexible,
+                max_record_bytes: builder.max_record_bytes,
+                max_record_fields: builder.max_record_fields,
                 trim: builder.trim,
                 first_field_count: None,
                 cur_pos: Position::new(),
@@ -1653,10 +1684,12 @@ impl<R: io::Read> Reader<R> {
             match res {
                 InputEmpty => continue,
                 OutputFull => {
+                    self.state.check_record_byte_limit(record)?;
                     record.expand_fields();
                     continue;
                 }
                 OutputEndsFull => {
+                    self.state.check_record_field_limit(record)?;
                     record.expand_ends();
                     continue;
                 }
@@ -1878,6 +1911,34 @@ impl<R: io::Read + io::Seek> Reader<R> {
 }
 
 impl ReaderState {
+    #[inline(always)]
+    fn check_record_byte_limit(&self, record: &ByteRecord) -> Result<()> {
+        if let Some(limit) = self.max_record_bytes {
+            if record.as_slice().len() as u64 >= limit {
+                return Err(Error::new(ErrorKind::RecordTooLarge {
+                    pos: record.position().cloned(),
+                    kind: RecordTooLargeKind::Bytes,
+                    limit,
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn check_record_field_limit(&self, record: &ByteRecord) -> Result<()> {
+        if let Some(limit) = self.max_record_fields {
+            if record.len() as u64 >= limit {
+                return Err(Error::new(ErrorKind::RecordTooLarge {
+                    pos: record.position().cloned(),
+                    kind: RecordTooLargeKind::Fields,
+                    limit,
+                }));
+            }
+        }
+        Ok(())
+    }
+
     #[inline(always)]
     fn add_record(&mut self, record: &ByteRecord) -> Result<()> {
         let i = self.cur_pos.record();
@@ -2166,7 +2227,9 @@ mod tests {
     use std::io;
 
     use crate::{
-        byte_record::ByteRecord, error::ErrorKind, string_record::StringRecord,
+        byte_record::ByteRecord,
+        error::{ErrorKind, RecordTooLargeKind},
+        string_record::StringRecord,
     };
 
     use super::{Position, ReaderBuilder, Trim};
@@ -2396,6 +2459,64 @@ mod tests {
         assert_eq!("quux", s(&rec[0]));
 
         assert!(!rdr.read_byte_record(&mut rec).unwrap());
+    }
+
+    #[test]
+    fn read_record_respects_max_record_bytes() {
+        let data = b("abcdef\n");
+        let mut rdr = ReaderBuilder::new()
+            .has_headers(false)
+            .max_record_bytes(Some(3))
+            .from_reader(data);
+        let mut rec = ByteRecord::with_capacity(3, 1);
+
+        match rdr.read_byte_record(&mut rec) {
+            Err(err) => match *err.kind() {
+                ErrorKind::RecordTooLarge {
+                    pos: Some(ref pos),
+                    kind: RecordTooLargeKind::Bytes,
+                    limit: 3,
+                } => assert_eq!(pos, &newpos(0, 1, 0)),
+                ref wrong => panic!("match failed, got {:?}", wrong),
+            },
+            wrong => panic!("match failed, got {:?}", wrong),
+        }
+    }
+
+    #[test]
+    fn read_record_respects_max_record_fields() {
+        let data = b("a,b,c\n");
+        let mut rdr = ReaderBuilder::new()
+            .has_headers(false)
+            .max_record_fields(Some(2))
+            .from_reader(data);
+        let mut rec = ByteRecord::with_capacity(6, 2);
+
+        match rdr.read_byte_record(&mut rec) {
+            Err(err) => match *err.kind() {
+                ErrorKind::RecordTooLarge {
+                    pos: Some(ref pos),
+                    kind: RecordTooLargeKind::Fields,
+                    limit: 2,
+                } => assert_eq!(pos, &newpos(0, 1, 0)),
+                ref wrong => panic!("match failed, got {:?}", wrong),
+            },
+            wrong => panic!("match failed, got {:?}", wrong),
+        }
+    }
+
+    #[test]
+    fn read_record_with_limits_allows_smaller_records() {
+        let data = b("ab,cd\n");
+        let mut rdr = ReaderBuilder::new()
+            .has_headers(false)
+            .max_record_bytes(Some(8))
+            .max_record_fields(Some(3))
+            .from_reader(data);
+        let mut rec = ByteRecord::new();
+
+        assert!(rdr.read_byte_record(&mut rec).unwrap());
+        assert_eq!(rec, vec!["ab", "cd"]);
     }
 
     #[test]
