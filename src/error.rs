@@ -85,6 +85,13 @@ pub enum ErrorKind {
     /// are called on a CSV reader that was asked to `seek` before it parsed
     /// the first record.
     Seek,
+    /// This error occurs when a record exceeds the configured byte limit.
+    RecordTooLarge {
+        /// The position of the record that exceeded the limit, if available.
+        pos: Option<Position>,
+        /// The configured maximum number of bytes allowed in a record.
+        max: u64,
+    },
     /// An error of this kind occurs only when using the Serde serializer.
     Serialize(String),
     /// An error of this kind occurs only when performing automatic
@@ -106,6 +113,7 @@ impl ErrorKind {
         match *self {
             ErrorKind::Utf8 { ref pos, .. } => pos.as_ref(),
             ErrorKind::UnequalLengths { ref pos, .. } => pos.as_ref(),
+            ErrorKind::RecordTooLarge { ref pos, .. } => pos.as_ref(),
             ErrorKind::Deserialize { ref pos, .. } => pos.as_ref(),
             _ => None,
         }
@@ -172,6 +180,19 @@ impl fmt::Display for Error {
                 "CSV error: cannot access headers of CSV data \
                  when the parser was seeked before the first record \
                  could be read"
+            ),
+            ErrorKind::RecordTooLarge { pos: None, max } => write!(
+                f,
+                "CSV error: found record larger than the configured limit of {} bytes",
+                max
+            ),
+            ErrorKind::RecordTooLarge { pos: Some(ref pos), max } => write!(
+                f,
+                "CSV error: record {} (line: {}, byte: {}): found record larger than the configured limit of {} bytes",
+                pos.record(),
+                pos.line(),
+                pos.byte(),
+                max
             ),
             ErrorKind::Serialize(ref err) => {
                 write!(f, "CSV write error: {}", err)
