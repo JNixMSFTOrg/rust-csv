@@ -26,6 +26,7 @@ use crate::{
 #[derive(Debug)]
 pub struct ReaderBuilder {
     capacity: usize,
+    max_record_len: u64,
     flexible: bool,
     has_headers: bool,
     trim: Trim,
@@ -41,6 +42,7 @@ impl Default for ReaderBuilder {
     fn default() -> ReaderBuilder {
         ReaderBuilder {
             capacity: 8 * (1 << 10),
+            max_record_len: u64::MAX,
             flexible: false,
             has_headers: true,
             trim: Trim::default(),
@@ -621,6 +623,17 @@ impl ReaderBuilder {
         self
     }
 
+    /// Set the maximum number of bytes permitted in a single record.
+    ///
+    /// This limit applies to every parsed record, including the first row when
+    /// it is lazily read via `headers` or `byte_headers`.
+    ///
+    /// The default is no limit.
+    pub fn max_record_len(&mut self, max_record_len: u64) -> &mut ReaderBuilder {
+        self.max_record_len = max_record_len;
+        self
+    }
+
     /// Enable or disable the NFA for parsing CSV.
     ///
     /// This is intended to be a debug option. The NFA is always slower than
@@ -739,6 +752,7 @@ struct ReaderState {
     /// is reported.
     flexible: bool,
     trim: Trim,
+    max_record_len: u64,
     /// The number of fields in the first record parsed.
     first_field_count: Option<u64>,
     /// The current position of the parser.
@@ -831,6 +845,7 @@ impl<R: io::Read> Reader<R> {
                 has_headers: builder.has_headers,
                 flexible: builder.flexible,
                 trim: builder.trim,
+                max_record_len: builder.max_record_len,
                 first_field_count: None,
                 cur_pos: Position::new(),
                 first: false,
@@ -1653,10 +1668,22 @@ impl<R: io::Read> Reader<R> {
             match res {
                 InputEmpty => continue,
                 OutputFull => {
+                    if outlen as u64 >= self.state.max_record_len {
+                        return Err(Error::new(ErrorKind::RecordTooLarge {
+                            pos: record.position().cloned(),
+                            max: self.state.max_record_len,
+                        }));
+                    }
                     record.expand_fields();
                     continue;
                 }
                 OutputEndsFull => {
+                    if endlen as u64 >= self.state.max_record_len {
+                        return Err(Error::new(ErrorKind::RecordTooLarge {
+                            pos: record.position().cloned(),
+                            max: self.state.max_record_len,
+                        }));
+                    }
                     record.expand_ends();
                     continue;
                 }
@@ -2617,6 +2644,53 @@ mod tests {
         let mut rdr = ReaderBuilder::new().from_reader("".as_bytes());
         let r = rdr.byte_headers().unwrap();
         assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn headers_over_max_record_len_fail() {
+        let data = b("abcdef\nxyz");
+        let mut rdr = ReaderBuilder::new().max_record_len(3).from_reader(data);
+
+        match rdr.byte_headers() {
+            Err(err) => match *err.kind() {
+                ErrorKind::RecordTooLarge { pos: Some(ref pos), max: 3 } => {
+                    assert_eq!(pos, &newpos(0, 1, 0));
+                }
+                ref wrong => panic!("match failed, got {:?}", wrong),
+            },
+            wrong => panic!("match failed, got {:?}", wrong),
+        }
+    }
+
+    #[test]
+    fn records_over_max_record_len_fail() {
+        let data = b("ab\nabcdef\nxyz");
+        let mut rdr = ReaderBuilder::new()
+            .has_headers(false)
+            .max_record_len(3)
+            .from_reader(data);
+        let mut rec = ByteRecord::new();
+
+        assert!(rdr.read_byte_record(&mut rec).unwrap());
+        assert_eq!(b"ab", &rec[0]);
+
+        match rdr.read_byte_record(&mut rec) {
+            Err(err) => match *err.kind() {
+                ErrorKind::RecordTooLarge { pos: Some(ref pos), max: 3 } => {
+                    assert_eq!(pos, &newpos(3, 2, 1));
+                }
+                ref wrong => panic!("match failed, got {:?}", wrong),
+            },
+            wrong => panic!("match failed, got {:?}", wrong),
+        }
+    }
+
+    #[test]
+    fn headers_within_max_record_len_still_work() {
+        let data = b("abc\nxyz");
+        let mut rdr = ReaderBuilder::new().max_record_len(3).from_reader(data);
+
+        assert_eq!(rdr.byte_headers().unwrap(), vec!["abc"]);
     }
 
     // Test that reading the first record on empty data works.
